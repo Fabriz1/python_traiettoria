@@ -1,5 +1,5 @@
-streamlit
-streamlit-drawable-canvas
+streamlit==1.29.0
+streamlit-drawable-canvas>=0.9.3
 opencv-contrib-python-headless
 numpy
 pandas
