@@ -277,11 +277,23 @@ with st.sidebar:
         st.rerun()
 
 # 0. CARICAMENTO
+# 0. CARICAMENTO
 if st.session_state.video_file_path is None:
+    uploaded = st.file_uploader("Carica Video", type=["mp4", "mov"])
+    if uploaded:
+        # SALVATAGGIO STATICO (Metodo "Brutale" ma Infallibile su Linux)
+        # Invece di tempfile, scriviamo un file vero sul disco.
+        with open("input_video.mp4", "wb") as f:
+            f.write(uploaded.getbuffer())
+        
+        st.session_state.video_file_path = "input_video.mp4"
+        st.session_state.step = 1
+        st.rerun()
     uploaded = st.file_uploader("Carica Video", type=["mp4", "mov"])
     if uploaded:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') 
         tfile.write(uploaded.read())
+        tfile.close()
         st.session_state.video_file_path = tfile.name
         st.session_state.step = 1
         st.rerun()
