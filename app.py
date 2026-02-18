@@ -15,6 +15,8 @@ st.set_page_config(page_title="Barbell Tracker Wizard", layout="wide")
 if 'step' not in st.session_state: st.session_state.step = 0
 if 'processed' not in st.session_state: st.session_state.processed = False
 if 'video_file_path' not in st.session_state: st.session_state.video_file_path = None
+# Questa variabile serve a mantenere l'immagine viva nella memoria
+if 'preview_img' not in st.session_state: st.session_state.preview_img = None 
 if 'persp_pts' not in st.session_state: st.session_state.persp_pts = []
 if 'plate_rect' not in st.session_state: st.session_state.plate_rect = None
 if 'track_rect' not in st.session_state: st.session_state.track_rect = None
@@ -56,6 +58,9 @@ def draw_side_graph(trajectory, velocities, width, height, current_phase, start_
 
 def run_analysis(input_path, output_path, plate_bbox, track_bbox, perspective_points, exercise_type, plate_diam_cm):
     cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        return []
+        
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     if fps == 0: fps = 30
     w_orig = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -91,6 +96,8 @@ def run_analysis(input_path, output_path, plate_bbox, track_bbox, perspective_po
 
     tracker = cv2.TrackerCSRT_create()
     ret, frame = cap.read()
+    if not ret: return []
+    
     tracker.init(frame, track_bbox)
 
     vel_buf = deque(maxlen=5)
@@ -102,18 +109,13 @@ def run_analysis(input_path, output_path, plate_bbox, track_bbox, perspective_po
     
     start_point_corrected = None
     
-    # LOGICA ROBUSTA (ISTERESI / DISTANZA)
     current_phase = "Statico"
     rep_counter = 0
     phase_start_frame = 0
     
-    # Picchi Raggiunti (in Metri)
-    # Importante: In coordinate CV, Y cresce scendendo.
-    # Quindi MIN_Y = Punto più Alto (Top), MAX_Y = Punto più Basso (Bottom)
     peak_top_y_m = float('inf') 
     peak_bottom_y_m = float('-inf')
     
-    # Soglia Movimento: 6 cm
     ROM_THRESH_M = 0.06 
     
     temp_stats = {"max": 0, "sum": 0, "cnt": 0}
@@ -137,7 +139,6 @@ def run_analysis(input_path, output_path, plate_bbox, track_bbox, perspective_po
             cx, cy = int(x + w/2), int(y + h/2)
             cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 1)
             
-            # Coordinate Raddrizzate
             curr_x, curr_y = cx, cy
             if matrix is not None:
                 pt = np.array([[[cx, cy]]], dtype=np.float32)
@@ -158,16 +159,11 @@ def run_analysis(input_path, output_path, plate_bbox, track_bbox, perspective_po
             
             traj_corrected.append((smooth_x, smooth_y))
 
-            # Y in Metri
             curr_y_m = smooth_y * meters_per_px
             
-            # Calcolo Velocità Istantanea (basata su delta posizionale)
-            # Se siamo al primo frame, velocità 0
             instant_vel = 0
             if len(traj_corrected) > 1:
-                # Delta rispetto al frame precedente
                 prev_y_m = traj_corrected[-2][1] * meters_per_px
-                # Invertiamo segno: se Y diminuisce (sale), velocità positiva
                 delta_m = prev_y_m - curr_y_m
                 instant_vel = delta_m * fps
             
@@ -176,40 +172,34 @@ def run_analysis(input_path, output_path, plate_bbox, track_bbox, perspective_po
             vel_history.append(smooth_vel)
             abs_vel = abs(smooth_vel)
 
-            # --- LOGICA ISTERESI ---
-            
-            # Aggiorna estremi
-            if curr_y_m < peak_top_y_m: peak_top_y_m = curr_y_m       # Nuovo massimo in alto
-            if curr_y_m > peak_bottom_y_m: peak_bottom_y_m = curr_y_m # Nuovo massimo in basso
+            # LOGICA ISTERESI
+            if curr_y_m < peak_top_y_m: peak_top_y_m = curr_y_m       
+            if curr_y_m > peak_bottom_y_m: peak_bottom_y_m = curr_y_m 
             
             new_phase = current_phase
             
-            # Calcolo distanza percorsa dall'ultimo estremo
-            dist_from_top = curr_y_m - peak_top_y_m      # Quanto siamo scesi (positivo)
-            dist_from_bottom = peak_bottom_y_m - curr_y_m # Quanto siamo saliti (positivo)
+            dist_from_top = curr_y_m - peak_top_y_m      
+            dist_from_bottom = peak_bottom_y_m - curr_y_m 
             
-            # Logica Transizioni
             if current_phase == "Statico":
                 if dist_from_top > ROM_THRESH_M:
                     new_phase = "Eccentrica"
-                    peak_bottom_y_m = curr_y_m # Reset fondo
+                    peak_bottom_y_m = curr_y_m 
                 elif dist_from_bottom > ROM_THRESH_M:
                     new_phase = "Concentrica"
-                    peak_top_y_m = curr_y_m # Reset cima
+                    peak_top_y_m = curr_y_m 
             
-            elif current_phase == "Eccentrica": # Stiamo scendendo
-                if dist_from_bottom > ROM_THRESH_M: # Se siamo risaliti di X cm
+            elif current_phase == "Eccentrica": 
+                if dist_from_bottom > ROM_THRESH_M: 
                     new_phase = "Concentrica"
-                    peak_top_y_m = curr_y_m # Il nuovo top parte da qui
+                    peak_top_y_m = curr_y_m 
             
-            elif current_phase == "Concentrica": # Stiamo salendo
-                if dist_from_top > ROM_THRESH_M: # Se siamo riscesi di X cm
+            elif current_phase == "Concentrica": 
+                if dist_from_top > ROM_THRESH_M: 
                     new_phase = "Eccentrica"
-                    peak_bottom_y_m = curr_y_m # Il nuovo bottom parte da qui
+                    peak_bottom_y_m = curr_y_m 
 
-            # CAMBIO FASE
             if new_phase != current_phase:
-                # Salva dati fase precedente
                 if temp_stats["cnt"] > 5:
                     avg_v = temp_stats["sum"] / temp_stats["cnt"]
                     peak_v = temp_stats["max"]
@@ -233,16 +223,13 @@ def run_analysis(input_path, output_path, plate_bbox, track_bbox, perspective_po
                             "Durata (s)": round(duration, 2)
                         })
                 
-                # Reset
                 current_phase = new_phase
                 phase_start_frame = frame_cnt
                 temp_stats = {"max": 0, "sum": 0, "cnt": 0}
                 
-                # Reset estremi opposti per tracciare la prossima inversione pulita
                 if new_phase == "Eccentrica": peak_bottom_y_m = curr_y_m
                 if new_phase == "Concentrica": peak_top_y_m = curr_y_m
 
-            # Accumulo stats
             if current_phase != "Statico":
                 temp_stats["cnt"] += 1
                 temp_stats["sum"] += abs_vel
@@ -276,34 +263,43 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-# 0. CARICAMENTO
-# 0. CARICAMENTO
+# 0. CARICAMENTO (Corretto per evitare duplicati e errori di lettura)
 if st.session_state.video_file_path is None:
-    uploaded = st.file_uploader("Carica Video", type=["mp4", "mov"])
+    # UN SOLO file_uploader qui
+    uploaded = st.file_uploader("Carica Video", type=["mp4", "mov", "avi"], key="uploader")
     if uploaded:
-        # SALVATAGGIO STATICO (Metodo "Brutale" ma Infallibile su Linux)
-        # Invece di tempfile, scriviamo un file vero sul disco.
-        with open("input_video.mp4", "wb") as f:
-            f.write(uploaded.getbuffer())
-        
-        st.session_state.video_file_path = "input_video.mp4"
-        st.session_state.step = 1
-        st.rerun()
-    uploaded = st.file_uploader("Carica Video", type=["mp4", "mov"])
-    if uploaded:
+        # Salva il file video
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') 
         tfile.write(uploaded.read())
         tfile.close()
+        
         st.session_state.video_file_path = tfile.name
-        st.session_state.step = 1
-        st.rerun()
+        
+        # Estrai SUBITO il frame per l'anteprima (per non doverlo rileggere dopo)
+        cap = cv2.VideoCapture(tfile.name)
+        # Proviamo a leggere il 10° frame per evitare schermate nere iniziali
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 10)
+        ret, frame = cap.read()
+        if not ret:
+            # Se fallisce, riprova col primo
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = cap.read()
+        cap.release()
+        
+        if ret:
+            # Converti BGR (OpenCV) a RGB (Streamlit/PIL)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            st.session_state.preview_img = Image.fromarray(frame_rgb)
+            st.session_state.step = 1
+            st.rerun()
+        else:
+            st.error("Errore: impossibile leggere il video. Prova un altro file.")
 
-else:
-    # Carica Frame
-    cap = cv2.VideoCapture(st.session_state.video_file_path)
-    ret, frame = cap.read()
-    cap.release()
-    pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+# Se il video è caricato, mostriamo l'interfaccia usando l'immagine salvata
+elif st.session_state.preview_img is not None:
+    
+    # Recuperiamo l'immagine dalla memoria
+    pil_img = st.session_state.preview_img
     
     # --- STEP 1: PROSPETTIVA ---
     if st.session_state.step == 1:
@@ -311,11 +307,13 @@ else:
         st.info("Clicca 4 punti (Rettangolo Verticale). Se è già dritto, premi AVANTI.")
         
         cw = 700
+        # Calcolo proporzione altezza
         ch = int(pil_img.height * (cw / pil_img.width))
         
         cv1 = st_canvas(
             fill_color="rgba(0,255,0,0.3)", stroke_width=1, point_display_radius=4,
-            stroke_color="#00FF00", background_image=pil_img,
+            stroke_color="#00FF00", 
+            background_image=pil_img, # Qui usiamo l'immagine salvata
             height=ch, width=cw, drawing_mode="point", key="cv1"
         )
         
@@ -400,23 +398,24 @@ else:
             else:
                 st.error("Seleziona il tracker!")
 
-    # --- RISULTATI ---
-    if st.session_state.processed:
-        st.divider()
-        st.subheader("📊 Report Finale")
-        
-        if st.session_state.df_res is not None:
-            df = st.session_state.df_res
-            def color_phase(val):
-                return 'color: green' if val == 'Concentrica' else 'color: red'
-            st.dataframe(df.style.applymap(color_phase, subset=['Fase']), use_container_width=True)
-        else:
-            st.warning("Nessuna rep valida (movimento < 6cm).")
-        
+# --- RISULTATI ---
+if st.session_state.processed:
+    st.divider()
+    st.subheader("📊 Report Finale")
+    
+    if st.session_state.df_res is not None and not st.session_state.df_res.empty:
+        df = st.session_state.df_res
+        def color_phase(val):
+            return 'color: green' if val == 'Concentrica' else 'color: red'
+        st.dataframe(df.style.applymap(color_phase, subset=['Fase']), use_container_width=True)
+    else:
+        st.warning("Nessuna rep valida rilevata (movimento < 6cm o errore tracking).")
+    
+    if st.session_state.vid_res:
         st.video(st.session_state.vid_res)
         with open(st.session_state.vid_res, "rb") as f:
             st.download_button("📥 Scarica Video", f, "analisi_wizard.mp4")
-        
-        if st.button("🔄 Nuova Analisi"):
-            st.session_state.clear()
-            st.rerun()
+    
+    if st.button("🔄 Nuova Analisi"):
+        st.session_state.clear()
+        st.rerun()
